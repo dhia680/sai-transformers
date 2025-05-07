@@ -21,11 +21,12 @@ from ...utils import (
     replace_return_docstrings,
 )
 from ...utils.deprecation import deprecate_kwarg
-from .configuration_swissai import SwissAIConfig
+from .configuration_swissai_fp8 import SwissAIFP8Config
+from .utils import LayerScale, ScaledSwiglu, IdentityOp
 
 
 logger = logging.get_logger(__name__)
-_CONFIG_FOR_DOC = "SwissAIConfig"
+_CONFIG_FOR_DOC = "SwissAIFP8Config"
 
 class XIELU(nn.Module):
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
@@ -43,13 +44,16 @@ class XIELU(nn.Module):
                            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
 
 
-class SwissAIRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+class SwissAIFP8RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6, frozen_qk_gain=False):
         """
-        SwissAIRMSNorm is equivalent to T5LayerNorm
+        SwissAIFP8RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.ones(hidden_size)) 
+        # init gains (weights) to layerscale
+        if frozen_qk_gain:   # freezing rmsnorm gains (done in q_norm and k_norm) 
+            self.weight.requires_grad = False
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
@@ -61,6 +65,17 @@ class SwissAIRMSNorm(nn.Module):
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+    
+class SwissAIFP8DyTanh(nn.Module):
+    def __init__(self, num_features, alpha_init_value=0.5):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
+        self.weight = nn.Parameter(torch.ones(num_features))
+        self.bias = nn.Parameter(torch.zeros(num_features))
+    
+    def forward(self, x):
+        x = torch.tanh(self.alpha * x)
+        return x * self.weight + self.bias
 
 
 def rotate_half(x):
@@ -135,18 +150,20 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
-class SwissAIAttention(nn.Module):
+class SwissAIFP8Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: SwissAIConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: SwissAIFP8Config, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
+        self.scaling = config.softmax_scale if config.softmax_scale else self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
+        self.use_layerscale = self.config.layerscale and not config.post_norm   # layerscale is fused with postnorm gains if postnorm is True
+        self.attn_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp
 
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
@@ -161,8 +178,14 @@ class SwissAIAttention(nn.Module):
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
         if self.config.qk_norm:
-            self.q_norm = SwissAIRMSNorm(self.head_dim, config.rms_norm_eps)
-            self.k_norm = SwissAIRMSNorm(self.head_dim, config.rms_norm_eps)
+            if self.config.qk_type == "dyt":  # dynamic tanh
+                self.q_norm = SwissAIFP8DyTanh(self.head_dim)
+                self.k_norm = SwissAIFP8DyTanh(self.head_dim)
+            elif self.config.qk_type == "rms":  # rms norm
+                self.q_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps, frozen_qk_gain=True)
+                self.k_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps)
+            else:
+                raise ValueError(f"Unknown qk_type {self.config.qk_type}.")
         else:
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
@@ -220,10 +243,11 @@ class SwissAIAttention(nn.Module):
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        attn_output = self.attn_layerscale(attn_output)
         return attn_output, attn_weights
 
 
-class SwissAIMLP(nn.Module):
+class SwissAIFP8MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -233,30 +257,41 @@ class SwissAIMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         if config.hidden_act == "xielu":
             self.act_fn = XIELU()
+        elif config.hidden_act == "smoothswiglu":
+            self.act_fn = ScaledSwiglu()  # TODO: check the implementation
         else:
-            self.act_fn = ACT2FN[config.hidden_act]
+            self.act_fn = ACT2FN[config.hidden_act] # can be gelu, fastgelu, swish, silu...
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.use_layerscale = config.layerscale and not config.post_norm
+        self.mlp_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp  # fused with postnorm gains if postnorm is True
+
 
     def forward(self, x):
         if self.config.hidden_act == "xielu":
-            # in case of xielu, no gated MLP
+             # in case of xielu, no gated MLP
             down_proj = self.down_proj(self.act_fn(self.up_proj(x)))
-        else:
-           down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        elif self.config.hidden_act == "smoothswiglu":
+             # in case of smoothswiglu, gated MLP with scaling/unscaling
+            activated, scale = self.smooth_swiglu(self.gate_proj(x), self.up_proj(x))
+            down_proj = self.down_proj(activated) * scale
+        else: # gated MLP
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        down_proj = self.layerscale(down_proj)
         return down_proj
 
 
-class SwissAIDecoderLayer(nn.Module):
-    def __init__(self, config: SwissAIConfig, layer_idx: int):
+class SwissAIFP8DecoderLayer(nn.Module):
+    def __init__(self, config: SwissAIFP8Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = SwissAIAttention(config=config, layer_idx=layer_idx)
-
-        self.mlp = SwissAIMLP(config)
-        self.attention_layernorm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.feedforward_layernorm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.self_attn = SwissAIFP8Attention(config=config, layer_idx=layer_idx)
         
-        self.post_norm = config.post_norm
+        self.fuse_layerscale = config.layerscale and config.post_norm   # True --> do not load layerscale
+        self.post_norm = config.post_norm   # layerscale will be incorporated/fused into postnorm gains since loading
+
+        self.mlp = SwissAIFP8MLP(config)
+        self.attention_layernorm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.feedforward_layernorm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -272,7 +307,7 @@ class SwissAIDecoderLayer(nn.Module):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
 
-        if not self.post_norm: # i.e pre_norm
+        if self.pre_norm:
             hidden_states = self.attention_layernorm(hidden_states)
 
         # Self Attention
@@ -288,7 +323,8 @@ class SwissAIDecoderLayer(nn.Module):
             **kwargs,
         )
         if self.post_norm:
-            hidden_states = self.attention_layernorm(hidden_states)
+            if self.fuse_layerscale:
+                hidden_states = self.attention_layernorm(hidden_states)  # TODO: fuse layerscale with postnorm gains
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -307,8 +343,8 @@ class SwissAIDecoderLayer(nn.Module):
         return outputs
 
 
-class SwissAIRotaryEmbedding(nn.Module):
-    def __init__(self, config: SwissAIConfig, device=None):
+class SwissAIFP8RotaryEmbedding(nn.Module):
+    def __init__(self, config: SwissAIFP8Config, device=None):
         super().__init__()
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
@@ -368,7 +404,7 @@ class SwissAIRotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-SWISSAI_START_DOCSTRING = r"""
+SwissAIFP8_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
@@ -378,7 +414,7 @@ SWISSAI_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`SwissAIConfig`]):
+        config ([`SwissAIFP8Config`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -386,14 +422,14 @@ SWISSAI_START_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare SwissAI Model outputting raw hidden-states without any specific head on top.",
-    SWISSAI_START_DOCSTRING,
+    "The bare SwissAIFP8 Model outputting raw hidden-states without any specific head on top.",
+    SwissAIFP8_START_DOCSTRING,
 )
-class SwissAIPreTrainedModel(PreTrainedModel):
-    config_class = SwissAIConfig
+class SwissAIFP8PreTrainedModel(PreTrainedModel):
+    config_class = SwissAIFP8Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["SwissAIDecoderLayer"]
+    _no_split_modules = ["SwissAIFP8DecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
@@ -415,7 +451,7 @@ class SwissAIPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-SWISSAI_INPUTS_DOCSTRING = r"""
+SwissAIFP8_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -491,29 +527,32 @@ SWISSAI_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare SwissAI Model outputting raw hidden-states without any specific head on top.",
-    SWISSAI_START_DOCSTRING,
+    "The bare SwissAIFP8 Model outputting raw hidden-states without any specific head on top.",
+    SwissAIFP8_START_DOCSTRING,
 )
-class SwissAIModel(SwissAIPreTrainedModel):
+class SwissAIFP8Model(SwissAIFP8PreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`SwissAIDecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`SwissAIFP8DecoderLayer`]
 
     Args:
-        config: SwissAIConfig
+        config: SwissAIFP8Config
     """
 
-    def __init__(self, config: SwissAIConfig):
+    def __init__(self, config: SwissAIFP8Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [SwissAIDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [SwissAIFP8DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = SwissAIRotaryEmbedding(config=config)
+        self.norm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = SwissAIFP8RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
+
+        # input_upscale: float the value used to upscale the output of the tokens' embeddings 
+        self.input_upscale = config.input_upscale
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -524,7 +563,7 @@ class SwissAIModel(SwissAIPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(SWISSAI_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(SwissAIFP8_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -556,7 +595,9 @@ class SwissAIModel(SwissAIPreTrainedModel):
             use_cache = False
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids)*self.input_upscale if (self.input_upscale != 1.0) else self.embed_tokens(input_ids)
+        else:
+            inputs_embeds = inputs_embeds * self.input_upscale if (self.input_upscale != 1.0) else inputs_embeds
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache()
@@ -758,14 +799,14 @@ class SwissAIModel(SwissAIPreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class SwissAIForCausalLM(SwissAIPreTrainedModel, GenerationMixin):
+class SwissAIFP8ForCausalLM(SwissAIFP8PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = SwissAIModel(config)
+        self.model = SwissAIFP8Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -791,7 +832,7 @@ class SwissAIForCausalLM(SwissAIPreTrainedModel, GenerationMixin):
         return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    @add_start_docstrings_to_model_forward(SWISSAI_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(SwissAIFP8_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -827,10 +868,10 @@ class SwissAIForCausalLM(SwissAIPreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, SwissAIForCausalLM
+        >>> from transformers import AutoTokenizer, SwissAIFP8ForCausalLM
 
-        >>> model = SwissAIForCausalLM.from_pretrained("SwissAI-2-7b-hf")
-        >>> tokenizer = AutoTokenizer.from_pretrained("SwissAI-2-7b-hf")
+        >>> model = SwissAIFP8ForCausalLM.from_pretrained("SwissAIFP8-2-7b-hf")
+        >>> tokenizer = AutoTokenizer.from_pretrained("SwissAIFP8-2-7b-hf")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
@@ -883,4 +924,4 @@ class SwissAIForCausalLM(SwissAIPreTrainedModel, GenerationMixin):
         )
 
 
-__all__ = ["SwissAIForCausalLM", "SwissAIModel", "SwissAIPreTrainedModel"]
+__all__ = ["SwissAIFP8ForCausalLM", "SwissAIFP8Model", "SwissAIFP8PreTrainedModel"]
