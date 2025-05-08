@@ -127,10 +127,12 @@ class SwissAIFP8Config(PretrainedConfig):
         softmax_scale=None,
         rms_norm_eps=1e-5,
         qk_norm=True,
+        freeze_qk=True,
         qk_type="rms",  
         pre_norm=False, 
         post_norm=True, 
-        input_upscale=1.0,   # float the value used to upscale the output of the vocab embeddings   
+        input_upscale=1.0,   # float the value used to upscale the output of the vocab embeddings,
+        layerscale=True,
         **kwargs,
     ):
         super().__init__(
@@ -165,11 +167,14 @@ class SwissAIFP8Config(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
 
         self.qk_norm = qk_norm
+        self.freeze_qk = freeze_qk
         self.qk_type = qk_type
         self.pre_norm = pre_norm
         self.post_norm = post_norm
         self.input_upscale = input_upscale
+        self.layerscale = layerscale
         assert self.input_upscale > 0, f"input_upscale must be > 0, got {self.input_upscale}"
+        assert self.post_norm != self.pre_norm, f"post_norm and pre_norm cannot be the same, got {self.post_norm} == {self.pre_norm}"
 
     def _rope_scaling_validation(self):
         """

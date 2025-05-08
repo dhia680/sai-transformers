@@ -182,7 +182,7 @@ class SwissAIFP8Attention(nn.Module):
                 self.q_norm = SwissAIFP8DyTanh(self.head_dim)
                 self.k_norm = SwissAIFP8DyTanh(self.head_dim)
             elif self.config.qk_type == "rms":  # rms norm
-                self.q_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps, frozen_qk_gain=True)
+                self.q_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps, frozen_qk_gain=config.freeze_qk)
                 self.k_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps)
             else:
                 raise ValueError(f"Unknown qk_type {self.config.qk_type}.")
@@ -287,7 +287,8 @@ class SwissAIFP8DecoderLayer(nn.Module):
         self.self_attn = SwissAIFP8Attention(config=config, layer_idx=layer_idx)
         
         self.fuse_layerscale = config.layerscale and config.post_norm   # True --> do not load layerscale
-        self.post_norm = config.post_norm   # layerscale will be incorporated/fused into postnorm gains since loading
+        logger.warning_once("Loading layerscale coefs isn't implemented yet...") if not self.fuse_layerscale else None
+        self.post_norm = config.post_norm   # layerscale is incorporated/fused into postnorm gains automatically since loading
 
         self.mlp = SwissAIFP8MLP(config)
         self.attention_layernorm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -307,7 +308,7 @@ class SwissAIFP8DecoderLayer(nn.Module):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
 
-        if self.pre_norm:
+        if self.pre_norm:   # norm --> attn --> residual
             hidden_states = self.attention_layernorm(hidden_states)
 
         # Self Attention
@@ -322,17 +323,17 @@ class SwissAIFP8DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-        if self.post_norm:
+        if self.post_norm:   # attn --> norm --> residual
             if self.fuse_layerscale:
                 hidden_states = self.attention_layernorm(hidden_states)  # TODO: fuse layerscale with postnorm gains
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
-        if not self.post_norm:
+        if self.pre_norm:   # norm --> MLP --> residual
             hidden_states = self.feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        if self.post_norm:
+        if self.post_norm:  # MLP --> norm --> residual
             hidden_states = self.feedforward_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
