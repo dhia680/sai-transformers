@@ -133,6 +133,7 @@ class SwissAIFP8Config(PretrainedConfig):
         post_norm=True, 
         input_upscale=1.0,   # float the value used to upscale the output of the vocab embeddings,
         layerscale=True,
+        final_layernorm=True,
         **kwargs,
     ):
         super().__init__(
@@ -173,6 +174,7 @@ class SwissAIFP8Config(PretrainedConfig):
         self.post_norm = post_norm
         self.input_upscale = input_upscale
         self.layerscale = layerscale
+        self.final_layernorm = final_layernorm
         assert self.input_upscale > 0, f"input_upscale must be > 0, got {self.input_upscale}"
         assert self.post_norm != self.pre_norm, f"post_norm and pre_norm cannot be the same, got {self.post_norm} == {self.pre_norm}"
 

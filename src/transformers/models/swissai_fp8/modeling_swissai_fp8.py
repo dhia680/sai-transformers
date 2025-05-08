@@ -554,6 +554,7 @@ class SwissAIFP8Model(SwissAIFP8PreTrainedModel):
 
         # input_upscale: float the value used to upscale the output of the tokens' embeddings 
         self.input_upscale = config.input_upscale
+        self.final_layernorm = config.final_layernorm
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -659,7 +660,7 @@ class SwissAIFP8Model(SwissAIFP8PreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states) if self.final_layernorm else hidden_states
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
