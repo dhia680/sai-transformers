@@ -163,7 +163,7 @@ class SwissAIFP8Attention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
         self.use_layerscale = self.config.layerscale and not config.post_norm   # layerscale is fused with postnorm gains if postnorm is True
-        self.attn_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp
+        self.attn_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp()
 
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
@@ -263,7 +263,7 @@ class SwissAIFP8MLP(nn.Module):
             self.act_fn = ACT2FN[config.hidden_act] # can be gelu, fastgelu, swish, silu...
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.use_layerscale = config.layerscale and not config.post_norm
-        self.mlp_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp  # fused with postnorm gains if postnorm is True
+        self.mlp_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp()  # fused with postnorm gains if postnorm is True
 
 
     def forward(self, x):
@@ -276,7 +276,7 @@ class SwissAIFP8MLP(nn.Module):
             down_proj = self.down_proj(activated) * scale
         else: # gated MLP
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        down_proj = self.layerscale(down_proj)
+        down_proj = self.mlp_layerscale(down_proj)
         return down_proj
 
 
@@ -288,6 +288,7 @@ class SwissAIFP8DecoderLayer(nn.Module):
         
         self.fuse_layerscale = config.layerscale and config.post_norm   # True --> do not load layerscale
         logger.warning_once("Loading layerscale coefs isn't implemented yet...") if not self.fuse_layerscale else None
+        self.pre_norm = config.pre_norm
         self.post_norm = config.post_norm   # layerscale is incorporated/fused into postnorm gains automatically since loading
 
         self.mlp = SwissAIFP8MLP(config)
@@ -324,7 +325,7 @@ class SwissAIFP8DecoderLayer(nn.Module):
             **kwargs,
         )
         if self.post_norm:   # attn --> norm --> residual
-            if self.fuse_layerscale:
+                # not fused layerscale logic not implemented yet
                 hidden_states = self.attention_layernorm(hidden_states)  # TODO: fuse layerscale with postnorm gains
         hidden_states = residual + hidden_states
 
