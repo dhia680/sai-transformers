@@ -67,15 +67,20 @@ class SwissAIFP8RMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
     
 class SwissAIFP8DyTanh(nn.Module):
-    def __init__(self, num_features, alpha_init_value=0.5):
+    def __init__(self, num_features, alpha_init_value=1.0):
         super().__init__()
         self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
         self.weight = nn.Parameter(torch.ones(num_features))
-        self.bias = nn.Parameter(torch.zeros(num_features))
+        print(f"SwissAIFP8DyTanh: alpha_init_value = {alpha_init_value}")
+        # self.bias = nn.Parameter(torch.zeros(num_features))
+
+    def reset_parameters(self):
+        nn.init.constant_(self.alpha, 1.0)
     
     def forward(self, x):
-        x = torch.tanh(self.alpha * x)
-        return x * self.weight + self.bias
+        return self.weight*torch.tanh(self.alpha*x) # assuming always no bias
+        # x = torch.tanh(self.alpha * x)
+        # return x * self.weight  
 
 
 def rotate_half(x):
@@ -258,10 +263,18 @@ class SwissAIFP8MLP(nn.Module):
         if config.hidden_act == "xielu":
             self.act_fn = XIELU()
         elif config.hidden_act == "smoothswiglu":
+            print('Gated MLP (sswiglu)')
             self.act_fn = ScaledSwiglu()  # TODO: check the implementation
-        else:
+            self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        elif config.hidden_act == "silu":
+            print('Gated MLP (swiglu)')
             self.act_fn = ACT2FN[config.hidden_act] # can be gelu, fastgelu, swish, silu...
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        else:
+            print(f"\nNO GATED MLP (using {config.hidden_act})"
+                  "\nOnly case where GLU is allowed is when using 'silu' or 'smoothswiglu'")
+            self.act_fn = ACT2FN[config.hidden_act]
+
         self.use_layerscale = config.layerscale and not config.post_norm
         self.mlp_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp()  # fused with postnorm gains if postnorm is True
 
@@ -274,8 +287,13 @@ class SwissAIFP8MLP(nn.Module):
              # in case of smoothswiglu, gated MLP with scaling/unscaling
             activated, scale = self.smooth_swiglu(self.gate_proj(x), self.up_proj(x))
             down_proj = self.down_proj(activated) * scale
-        else: # gated MLP
+        elif self.config.hidden_act == "silu":
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        else:  # gelu, fastgelu...
+            # in case of gelu, no gated MLP
+            down_proj = self.down_proj(self.act_fn(self.up_proj(x)))
+        # else: # gated MLP
+        #     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         down_proj = self.mlp_layerscale(down_proj)
         return down_proj
 
