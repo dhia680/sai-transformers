@@ -21,12 +21,12 @@ from ...utils import (
     replace_return_docstrings,
 )
 from ...utils.deprecation import deprecate_kwarg
-from .configuration_swissai_fp8 import SwissAIFP8Config
+from .configuration_fog import FOGConfig
 from .utils import LayerScale, ScaledSwiglu, IdentityOp
 
 
 logger = logging.get_logger(__name__)
-_CONFIG_FOR_DOC = "SwissAIFP8Config"
+_CONFIG_FOR_DOC = "FOGConfig"
 
 class XIELU(nn.Module):
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
@@ -44,10 +44,10 @@ class XIELU(nn.Module):
                            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
 
 
-class SwissAIFP8RMSNorm(nn.Module):
+class FOGRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6, frozen_qk_gain=False):
         """
-        SwissAIFP8RMSNorm is equivalent to T5LayerNorm
+        FOGRMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size)) 
@@ -66,12 +66,12 @@ class SwissAIFP8RMSNorm(nn.Module):
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
     
-class SwissAIFP8DyTanh(nn.Module):
+class FOGDyTanh(nn.Module):
     def __init__(self, num_features, alpha_init_value=1.0):
         super().__init__()
         self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
         self.weight = nn.Parameter(torch.ones(num_features))
-        print(f"SwissAIFP8DyTanh: alpha_init_value = {alpha_init_value}")
+        print(f"FOGDyTanh: alpha_init_value = {alpha_init_value}")
         # self.bias = nn.Parameter(torch.zeros(num_features))
 
     def reset_parameters(self):
@@ -155,10 +155,10 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
-class SwissAIFP8Attention(nn.Module):
+class FOGAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: SwissAIFP8Config, layer_idx: Optional[int] = None):
+    def __init__(self, config: FOGConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -184,11 +184,11 @@ class SwissAIFP8Attention(nn.Module):
         )
         if self.config.qk_norm:
             if self.config.qk_type == "dyt":  # dynamic tanh
-                self.q_norm = SwissAIFP8DyTanh(self.head_dim)
-                self.k_norm = SwissAIFP8DyTanh(self.head_dim)
+                self.q_norm = FOGDyTanh(self.head_dim)
+                self.k_norm = FOGDyTanh(self.head_dim)
             elif self.config.qk_type == "rms":  # rms norm
-                self.q_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps, frozen_qk_gain=config.freeze_qk)
-                self.k_norm = SwissAIFP8RMSNorm(self.head_dim, config.rms_norm_eps)
+                self.q_norm = FOGRMSNorm(self.head_dim, config.rms_norm_eps, frozen_qk_gain=config.freeze_qk)
+                self.k_norm = FOGRMSNorm(self.head_dim, config.rms_norm_eps)
             else:
                 raise ValueError(f"Unknown qk_type {self.config.qk_type}.")
         else:
@@ -252,7 +252,7 @@ class SwissAIFP8Attention(nn.Module):
         return attn_output, attn_weights
 
 
-class SwissAIFP8MLP(nn.Module):
+class FOGMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -298,20 +298,20 @@ class SwissAIFP8MLP(nn.Module):
         return down_proj
 
 
-class SwissAIFP8DecoderLayer(nn.Module):
-    def __init__(self, config: SwissAIFP8Config, layer_idx: int):
+class FOGDecoderLayer(nn.Module):
+    def __init__(self, config: FOGConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = SwissAIFP8Attention(config=config, layer_idx=layer_idx)
+        self.self_attn = FOGAttention(config=config, layer_idx=layer_idx)
         
         self.fuse_layerscale = config.layerscale and config.post_norm   # True --> do not load layerscale
         logger.warning_once("Loading layerscale coefs isn't implemented yet...") if not self.fuse_layerscale else None
         self.pre_norm = config.pre_norm
         self.post_norm = config.post_norm   # layerscale is incorporated/fused into postnorm gains automatically since loading
 
-        self.mlp = SwissAIFP8MLP(config)
-        self.attention_layernorm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.feedforward_layernorm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = FOGMLP(config)
+        self.attention_layernorm = FOGRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.feedforward_layernorm = FOGRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -363,8 +363,8 @@ class SwissAIFP8DecoderLayer(nn.Module):
         return outputs
 
 
-class SwissAIFP8RotaryEmbedding(nn.Module):
-    def __init__(self, config: SwissAIFP8Config, device=None):
+class FOGRotaryEmbedding(nn.Module):
+    def __init__(self, config: FOGConfig, device=None):
         super().__init__()
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
@@ -424,7 +424,7 @@ class SwissAIFP8RotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-SwissAIFP8_START_DOCSTRING = r"""
+FOG_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
@@ -434,7 +434,7 @@ SwissAIFP8_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`SwissAIFP8Config`]):
+        config ([`FOGConfig`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -442,14 +442,14 @@ SwissAIFP8_START_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare SwissAIFP8 Model outputting raw hidden-states without any specific head on top.",
-    SwissAIFP8_START_DOCSTRING,
+    "The bare FOG Model outputting raw hidden-states without any specific head on top.",
+    FOG_START_DOCSTRING,
 )
-class SwissAIFP8PreTrainedModel(PreTrainedModel):
-    config_class = SwissAIFP8Config
+class FOGPreTrainedModel(PreTrainedModel):
+    config_class = FOGConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["SwissAIFP8DecoderLayer"]
+    _no_split_modules = ["FOGDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
@@ -471,7 +471,7 @@ class SwissAIFP8PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-SwissAIFP8_INPUTS_DOCSTRING = r"""
+FOG_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -547,28 +547,28 @@ SwissAIFP8_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare SwissAIFP8 Model outputting raw hidden-states without any specific head on top.",
-    SwissAIFP8_START_DOCSTRING,
+    "The bare FOG Model outputting raw hidden-states without any specific head on top.",
+    FOG_START_DOCSTRING,
 )
-class SwissAIFP8Model(SwissAIFP8PreTrainedModel):
+class FOGModel(FOGPreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`SwissAIFP8DecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`FOGDecoderLayer`]
 
     Args:
-        config: SwissAIFP8Config
+        config: FOGConfig
     """
 
-    def __init__(self, config: SwissAIFP8Config):
+    def __init__(self, config: FOGConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [SwissAIFP8DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [FOGDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = SwissAIFP8RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = SwissAIFP8RotaryEmbedding(config=config)
+        self.norm = FOGRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = FOGRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
         # input_upscale: float the value used to upscale the output of the tokens' embeddings 
@@ -584,7 +584,7 @@ class SwissAIFP8Model(SwissAIFP8PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(SwissAIFP8_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(FOG_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -820,14 +820,14 @@ class SwissAIFP8Model(SwissAIFP8PreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class SwissAIFP8ForCausalLM(SwissAIFP8PreTrainedModel, GenerationMixin):
+class FOGForCausalLM(FOGPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = SwissAIFP8Model(config)
+        self.model = FOGModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -853,7 +853,7 @@ class SwissAIFP8ForCausalLM(SwissAIFP8PreTrainedModel, GenerationMixin):
         return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    @add_start_docstrings_to_model_forward(SwissAIFP8_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(FOG_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -889,10 +889,10 @@ class SwissAIFP8ForCausalLM(SwissAIFP8PreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, SwissAIFP8ForCausalLM
+        >>> from transformers import AutoTokenizer, FOGForCausalLM
 
-        >>> model = SwissAIFP8ForCausalLM.from_pretrained("SwissAIFP8-2-7b-hf")
-        >>> tokenizer = AutoTokenizer.from_pretrained("SwissAIFP8-2-7b-hf")
+        >>> model = FOGForCausalLM.from_pretrained("FOG-2-7b-hf")
+        >>> tokenizer = AutoTokenizer.from_pretrained("FOG-2-7b-hf")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
@@ -945,4 +945,4 @@ class SwissAIFP8ForCausalLM(SwissAIFP8PreTrainedModel, GenerationMixin):
         )
 
 
-__all__ = ["SwissAIFP8ForCausalLM", "SwissAIFP8Model", "SwissAIFP8PreTrainedModel"]
+__all__ = ["FOGForCausalLM", "FOGModel", "FOGPreTrainedModel"]

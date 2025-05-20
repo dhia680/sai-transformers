@@ -461,6 +461,7 @@ _import_structure = {
     ],
     "models.fnet": ["FNetConfig"],
     "models.focalnet": ["FocalNetConfig"],
+    "models.fog": ["FOGConfig"],
     "models.fsmt": [
         "FSMTConfig",
         "FSMTTokenizer",
@@ -812,7 +813,6 @@ _import_structure = {
     "models.swin2sr": ["Swin2SRConfig"],
     "models.swinv2": ["Swinv2Config"],
     "models.swissai": ["SwissAIConfig"],
-    "models.swissai_fp8": ["SwissAIFP8Config"],
     "models.switch_transformers": ["SwitchTransformersConfig"],
     "models.t5": ["T5Config"],
     "models.table_transformer": ["TableTransformerConfig"],
@@ -2416,6 +2416,14 @@ else:
             "FocalNetPreTrainedModel",
         ]
     )
+    _import_structure["models.fog"].extend(
+        [
+            "FOGModel",
+            "FOGConfig",
+            "FOGForCausalLM",
+            "FOGPreTrainedModel",
+        ]
+    )
     _import_structure["models.fsmt"].extend(["FSMTForConditionalGeneration", "FSMTModel", "PretrainedFSMTModel"])
     _import_structure["models.funnel"].extend(
         [
@@ -3693,14 +3701,6 @@ else:
             "SwissAIConfig",
             "SwissAIForCausalLM",
             "SwissAIPreTrainedModel",
-        ]
-    )
-    _import_structure["models.swissai_fp8"].extend(
-        [
-            "SwissAIFP8Model",
-            "SwissAIFP8Config",
-            "SwissAIFP8ForCausalLM",
-            "SwissAIFP8PreTrainedModel",
         ]
     )
     _import_structure["models.switch_transformers"].extend(
@@ -5627,6 +5627,9 @@ if TYPE_CHECKING:
     )
     from .models.fnet import FNetConfig
     from .models.focalnet import FocalNetConfig
+    from .models.fog import (
+        FOGConfig,
+    )
     from .models.fsmt import (
         FSMTConfig,
         FSMTTokenizer,
@@ -6016,9 +6019,6 @@ if TYPE_CHECKING:
     from .models.swinv2 import Swinv2Config
     from .models.swissai import (
         SwissAIConfig,
-    )
-    from .models.swissai_fp8 import (
-        SwissAIFP8Config,
     )
     from .models.switch_transformers import (
         SwitchTransformersConfig,
@@ -7439,6 +7439,11 @@ if TYPE_CHECKING:
             FocalNetModel,
             FocalNetPreTrainedModel,
         )
+        from .models.fog import (
+            FOGForCausalLM,
+            FOGModel,
+            FOGPreTrainedModel,
+        )
         from .models.fsmt import (
             FSMTForConditionalGeneration,
             FSMTModel,
@@ -8431,11 +8436,6 @@ if TYPE_CHECKING:
             SwissAIForCausalLM,
             SwissAIModel,
             SwissAIPreTrainedModel,
-        )
-        from .models.swissai_fp8 import (
-            SwissAIFP8ForCausalLM,
-            SwissAIFP8Model,
-            SwissAIFP8PreTrainedModel,
         )
         from .models.switch_transformers import (
             SwitchTransformersEncoderModel,

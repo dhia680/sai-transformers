@@ -5,8 +5,8 @@ from ...utils.import_utils import define_import_structure
 
 
 if TYPE_CHECKING:
-    from .configuration_swissai_fp8 import *
-    from .modeling_swissai_fp8 import *
+    from .configuration_fog import *
+    from .modeling_fog import *
 else:
     import sys
 

@@ -1,9 +1,9 @@
 from ...configuration_utils import PretrainedConfig
 
 
-class SwissAIFP8Config(PretrainedConfig):
+class FOGConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`SwissAIFP8Model`]. It is used to instantiate a SwissAI
+    This is the configuration class to store the configuration of a [`FOGModel`]. It is used to instantiate a FOG
     model according to the specified arguments, defining the model architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
@@ -12,8 +12,8 @@ class SwissAIFP8Config(PretrainedConfig):
 
     Args:
         vocab_size (`int`, *optional*, defaults to 50304):
-            Vocabulary size of the SwissAIFP8 model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`SwissAIFP8Model`]
+            Vocabulary size of the FOG model. Defines the number of different tokens that can be represented by the
+            `inputs_ids` passed when calling [`FOGModel`]
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
         intermediate_size (`int`, *optional*, defaults to 11008):
@@ -74,20 +74,20 @@ class SwissAIFP8Config(PretrainedConfig):
         post_norm (`bool`, *optional*, defaults to `False`):
             Whether to use a normalization after the self-attention and MLP layers, i.e. x = norm(f(x)) + x.
     ```python
-    >>> from transformers import SwissAIFP8Model, SwissAIFP8Config
+    >>> from transformers import FOGModel, FOGConfig
 
-    >>> # Initializing a SwissAIFP8 8B style configuration
-    >>> configuration = SwissAIFP8Config()
+    >>> # Initializing a FOG 8B style configuration
+    >>> configuration = FOGConfig()
 
-    >>> # Initializing a model from the SwissAIFP8 8B style configuration
-    >>> model = SwissAIFP8Model(configuration)
+    >>> # Initializing a model from the FOG 8B style configuration
+    >>> model = FOGModel(configuration)
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```
     """
 
-    model_type = "swissai_fp8"
+    model_type = "fog"
     keys_to_ignore_at_inference = ["past_key_values"]
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise_rep",  # we need to replicate here due to the added norm on q and k
@@ -199,4 +199,4 @@ class SwissAIFP8Config(PretrainedConfig):
             raise ValueError(f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")
 
 
-__all__ = ["SwissAIFP8Config"]
+__all__ = ["FOGConfig"]
