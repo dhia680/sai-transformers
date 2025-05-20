@@ -71,7 +71,6 @@ class FOGDyTanh(nn.Module):
         super().__init__()
         self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
         self.weight = nn.Parameter(torch.ones(num_features))
-        print(f"FOGDyTanh: alpha_init_value = {alpha_init_value}")
         # self.bias = nn.Parameter(torch.zeros(num_features))
 
     def reset_parameters(self):
@@ -264,15 +263,14 @@ class FOGMLP(nn.Module):
             self.act_fn = XIELU()
         elif config.hidden_act == "smoothswiglu":
             print('Gated MLP (sswiglu)')
-            self.act_fn = ScaledSwiglu()  # TODO: check the implementation
+            self.act_fn = ScaledSwiglu()
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         elif config.hidden_act == "silu":
             print('Gated MLP (swiglu)')
             self.act_fn = ACT2FN[config.hidden_act] # can be gelu, fastgelu, swish, silu...
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         else:
-            print(f"\nNO GATED MLP (using {config.hidden_act})"
-                  "\nOnly case where GLU is allowed is when using 'silu' or 'smoothswiglu'")
+            print(f"\nNO GATED MLP (using {config.hidden_act})")
             self.act_fn = ACT2FN[config.hidden_act]
 
         self.use_layerscale = config.layerscale and not config.post_norm
@@ -343,8 +341,8 @@ class FOGDecoderLayer(nn.Module):
             **kwargs,
         )
         if self.post_norm:   # attn --> norm --> residual
-                # not fused layerscale logic not implemented yet
-                hidden_states = self.attention_layernorm(hidden_states)  # TODO: fuse layerscale with postnorm gains
+                # unfused layerscale logic is not implemented
+                hidden_states = self.attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
         # Fully Connected

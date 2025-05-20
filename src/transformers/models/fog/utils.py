@@ -1,6 +1,5 @@
 from typing import Optional
 import os
-from typing import Tuple
 import torch.nn.functional as F
 import torch
 from torch import nn
@@ -65,8 +64,6 @@ class LayerScale(nn.Module):
             return y.to(x_dtype)
         return y
     
-
-# TODO: ensure that `DETACH_SCALED_SWIGLU` was put to false in the official evaluations
 class ScaledSwiglu(nn.Module):
     '''
     References (adapted from deepspeed to transformers):
@@ -76,7 +73,7 @@ class ScaledSwiglu(nn.Module):
     def __init__(self, delayed=False):
         super(ScaledSwiglu, self).__init__()
         self.delayed = delayed
-        self.register_buffer('scale', torch.tensor(1.0))   # Set a proper default value
+        self.register_buffer('scale', torch.tensor(1.0))
     
     def forward(self, gate_proj, up_proj):
         if self.delayed:
@@ -84,47 +81,19 @@ class ScaledSwiglu(nn.Module):
             self.scale = max(self.scale, max_abs)
             scale = self.scale
         else:
-            if os.getenv('DETACH_SCALED_SWIGLU', 'false').lower() == 'true':
+            if os.getenv('DETACH_SCALED_SWIGLU', 'false').lower() == 'true':  # doesn't matter as we only use eval mode
                 scale = up_proj.detach().abs().amax(dim=-1, keepdim=True)
             else:
                 scale = up_proj.abs().amax(dim=-1, keepdim=True)
         
-        scaled_up_proj = up_proj / scale.clamp(min=1e-12)  # Prevent division by zero
+        scaled_up_proj = up_proj / scale.clamp(min=1e-12)
         return F.silu(gate_proj) * scaled_up_proj, scale
-    # def __init__(self,
-    #              delayed:bool=False) -> None:
-    #     self.delayed = delayed
-    #     self.initialized = False
-    #     self.scale = None
-    
-    # def __call__(self, x:torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     x = torch.chunk(x, 2, dim=-1)
-
-    #     if self.delayed:
-    #         tmp = x[1].detach().abs().max(dim=-1, keepdim=True)[0]
-    #         if self.initialized:
-    #             s = self.scale.clone()
-    #             self.scale.zero_()
-    #         else:
-    #             s = tmp
-    #             self.scale = torch.zeros_like(tmp)
-    #             self.initialized = True
-    #         self.scale.add_(tmp)
-    #     else:
-    #         if os.getenv('DETACH_SCALED_SWIGLU', 'false').lower() == 'true':
-    #             s = x[1].detach().abs().max(dim=-1, keepdim=True)[0]
-    #         else:
-    #             s = x[1].abs().max(dim=-1, keepdim=True)[0]
-        
-    #     tmp = x[1] / s
-    #     return F.silu(x[0]) * tmp, s
 
 
 class IdentityOp(torch.nn.Module):
     """
     This is a placeholder for IdentityOp(x) -> x
     """
-
     def __init__(self, *args, **kwargs):
         super().__init__()
 
