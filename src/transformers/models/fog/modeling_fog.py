@@ -51,7 +51,6 @@ class FOGRMSNorm(nn.Module):
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size)) 
-        # init gains (weights) to layerscale
         if frozen_qk_gain:   # freezing rmsnorm gains (done in q_norm and k_norm) 
             self.weight.requires_grad = False
         self.variance_epsilon = eps
@@ -262,16 +261,16 @@ class FOGMLP(nn.Module):
         if config.hidden_act == "xielu":
             self.act_fn = XIELU()
         elif config.hidden_act == "smoothswiglu":
-            print('Gated MLP (sswiglu)')
+            print('GLU (sswiglu)')
             self.act_fn = ScaledSwiglu()
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         elif config.hidden_act == "silu":
-            print('Gated MLP (swiglu)')
-            self.act_fn = ACT2FN[config.hidden_act] # can be gelu, fastgelu, swish, silu...
+            print('GLU (swiglu)')
+            self.act_fn = ACT2FN[config.hidden_act]
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         else:
-            print(f"\nNO GATED MLP (using {config.hidden_act})")
-            self.act_fn = ACT2FN[config.hidden_act]
+            print(f"\nNOT GLU (using {config.hidden_act})")
+            self.act_fn = ACT2FN[config.hidden_act]  # can be gelu, fastgelu, swish, silu...
 
         self.use_layerscale = config.layerscale and not config.post_norm
         self.mlp_layerscale = LayerScale(config.hidden_size) if self.use_layerscale else IdentityOp()  # fused with postnorm gains if postnorm is True
@@ -290,8 +289,7 @@ class FOGMLP(nn.Module):
         else:  # gelu, fastgelu...
             # in case of gelu, no gated MLP
             down_proj = self.down_proj(self.act_fn(self.up_proj(x)))
-        # else: # gated MLP
-        #     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
         down_proj = self.mlp_layerscale(down_proj)
         return down_proj
 
@@ -303,7 +301,7 @@ class FOGDecoderLayer(nn.Module):
         self.self_attn = FOGAttention(config=config, layer_idx=layer_idx)
         
         self.fuse_layerscale = config.layerscale and config.post_norm   # True --> do not load layerscale
-        logger.warning_once("Loading layerscale coefs isn't implemented yet...") if not self.fuse_layerscale else None
+        logger.warning_once("Loading layerscale coefs isn't implemented yet (not needed)...") if not self.fuse_layerscale else None
         self.pre_norm = config.pre_norm
         self.post_norm = config.post_norm   # layerscale is incorporated/fused into postnorm gains automatically since loading
 
